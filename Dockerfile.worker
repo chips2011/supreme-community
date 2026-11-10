@@ -1,0 +1,35 @@
+# Cloud worker image (Phase B). A headless instance of the backend that runs the
+# agent as the user on an ephemeral Fly Machine. Booted on demand by the desktop
+# on "keep running in the cloud"; destroyed on flip-back / idle. See
+# docs/cloud-worker.md. Build + push: `npm run deploy:worker`.
+FROM node:22-slim
+
+# git for workspace baselines, tar for encrypted workspace archives, and certs
+# for HTTPS to Supabase/providers.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git tar ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# Model CLIs — same tools the desktop uses; auth arrives at runtime via the
+# encrypted credential handoff (never baked into the image).
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
+
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm install --omit=dev
+
+COPY server.mjs worker.mjs ./
+COPY lib ./lib
+
+# Claude Code refuses unattended permission bypasses as root. The official Node
+# image already provides this unprivileged account, and /dev/shm is writable so
+# worker.mjs can still create its private in-memory HOME at startup.
+USER node
+
+# Keep the injected CLI credentials and synced working state in the VM's
+# in-memory filesystem. worker.mjs creates this directory at process start.
+ENV HOME=/dev/shm/supreme-worker
+
+# SUPABASE_URL / SUPABASE_ANON_KEY / WB_SESSION_TOKEN / WB_USER_ID / WB_TASK are
+# passed per-machine at boot — NOT baked in.
+ENTRYPOINT ["node", "worker.mjs"]

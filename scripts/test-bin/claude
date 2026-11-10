@@ -1,0 +1,293 @@
+#!/usr/bin/env node
+
+// Deterministic Claude CLI fixture for connector lifecycle tests. It mirrors
+// Claude's stream-json envelope without contacting a model or live connector.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const args = process.argv.slice(2);
+const authFile = path.join(process.env.WORKBENCH_HOME || '/tmp', 'fixture-claude-auth');
+// The concrete id the real CLI reports for an alias (assistant.message.model).
+// WB_FIXTURE_CLAUDE_MODEL overrides it so a smoke can watch a label follow.
+const reportedModel = () => {
+  if (process.env.WB_FIXTURE_CLAUDE_MODEL) return process.env.WB_FIXTURE_CLAUDE_MODEL;
+  const requested = args[args.indexOf('--model') + 1] || '';
+  return { fable: 'claude-fable-5-1', opus: 'claude-opus-5', sonnet: 'claude-sonnet-5' }[requested] || requested || 'claude-sonnet-5';
+};
+// The real CLI's --help lists its options, and Supreme reads it once to learn
+// which flags this CLI takes (providers.mjs claudeSupports). WB_FIXTURE_CLAUDE_OLD
+// plays a CLI from before --thinking-display: not listed, and refused.
+if (args.includes('--help')) {
+  const flags = ['--model', '--output-format', '--input-format', '--verbose', '--include-partial-messages', '--effort', '--resume', '--mcp-config', '--strict-mcp-config', '--tools'];
+  if (!process.env.WB_FIXTURE_CLAUDE_OLD) flags.push('--thinking-display');
+  process.stdout.write(`Usage: claude [options] [command] [prompt]\n\nOptions:\n${flags.map((flag) => `  ${flag} <value>\n`).join('')}`);
+  process.exit(0);
+}
+if (process.env.WB_FIXTURE_CLAUDE_OLD && args.includes('--thinking-display')) {
+  process.stderr.write("error: unknown option '--thinking-display'\n");
+  process.exit(1);
+}
+if (args[0] === 'mcp' && args[1] === 'list') {
+  // Connector discovery. Rows come from fixture-connectors.json in the fixture
+  // home ({ claude: [{ name, state }] }) or FIXTURE_CLAUDE_CONNECTORS="Gmail:connected,Slack:needs auth".
+  let rows = [];
+  try { rows = JSON.parse(fs.readFileSync(path.join(process.env.WORKBENCH_HOME || '/tmp', 'fixture-connectors.json'), 'utf8')).claude || []; } catch {}
+  if (!rows.length && process.env.FIXTURE_CLAUDE_CONNECTORS) {
+    rows = process.env.FIXTURE_CLAUDE_CONNECTORS.split(',').map((item) => { const [name, state] = item.split(':'); return { name: name.trim(), state: (state || 'connected').trim() }; });
+  }
+  for (const row of rows) {
+    process.stdout.write(`claude.ai ${row.name}: https://example.com/${encodeURIComponent(row.name.toLowerCase())} - ${/needs auth/i.test(row.state) ? '✘ Needs auth' : '✔ Connected'}\n`);
+  }
+  process.exit(0);
+}
+if (args[0] === 'auth' && args[1] === 'status') {
+  const loggedIn = !fs.existsSync(authFile) || fs.readFileSync(authFile, 'utf8').trim() !== 'off';
+  process.stdout.write(`${JSON.stringify({ loggedIn, email: loggedIn ? 'fixture@example.com' : '', subscriptionType: loggedIn ? 'max' : '' })}\n`);
+  process.exit(0);
+}
+if (args[0] === 'auth' && args[1] === 'logout') {
+  fs.writeFileSync(authFile, 'off');
+  process.exit(0);
+}
+if (args[0] === 'auth' && args[1] === 'login') {
+  fs.writeFileSync(authFile, 'on');
+  process.exit(0);
+}
+
+const line = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+const tool = {
+  type: 'tool_use',
+  id: 'fixture-claude-granola',
+  name: 'mcp__claude_ai_Granola__search_meetings',
+  input: { meeting_title: 'Founder check-in', account_email: 'fixture@example.com' },
+};
+const fixtureHome = process.env.WORKBENCH_HOME || '/tmp';
+const promptLog = path.join(fixtureHome, 'fixture-claude-prompts.jsonl');
+const leadNameIn = (text) => { const names = [...String(text).matchAll(/New Smartlead reply\n([^\n]+)/g)].map((m) => m[1].replace(/^[*_~`]+|[*_~`]+$/g, '').trim()); return names[names.length - 1] || 'Lead'; };
+const responseDelay = Math.max(60, Number(process.env.WB_FIXTURE_CLAUDE_RESPONSE_MS) || 110);
+const timers = new Set();
+let inputIndex = 0;
+let initialEventsStarted = false;
+let inputBuffer = '';
+let stdinEnded = false;
+
+function schedule(callback, delay) {
+  const timer = setTimeout(() => {
+    timers.delete(timer);
+    callback();
+    if (stdinEnded && !timers.size) process.exit(0);
+  }, delay);
+  timers.add(timer);
+}
+
+function userText(message) {
+  const content = message?.message?.content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((block) => block?.type === 'text')
+    .map((block) => String(block.text || ''))
+    .join('\n')
+    .trim();
+}
+
+function emitInitialWork() {
+  if (initialEventsStarted) return;
+  initialEventsStarted = true;
+  schedule(() => {
+    line({
+      type: 'stream_event',
+      event: { type: 'content_block_start', content_block: { type: 'text', text: '' } },
+    });
+  }, 4);
+  schedule(() => {
+    line({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'I’ll verify the connected accounts first.' } },
+    });
+  }, 8);
+  schedule(() => {
+    line({
+      type: 'stream_event',
+      event: { type: 'content_block_start', content_block: { ...tool, input: {} } },
+    });
+  }, 15);
+  schedule(() => {
+    line({ type: 'assistant', message: { model: reportedModel(), content: [tool] } });
+  }, 35);
+  schedule(() => {
+    line({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: tool.id,
+          content: JSON.stringify({ duration_minutes: 22, meetings: [{ title: 'Founder check-in' }] }),
+        }],
+      },
+    });
+  }, 70);
+}
+
+// A fold request (lib/fold.mjs) is answered from the messages it quotes: a
+// narrative, one fact copied right, one with its number drifted (the fact
+// check must replace it with the source's own words), the Rekord line kept
+// exactly, and one citing a message that does not exist.
+function fixtureFold(prompt) {
+  const rows = [...prompt.matchAll(/^\[m:([^\]]+)\] (User|Assistant): (.*)$/gm)].map((m) => ({ id: m[1], role: m[2], text: m[3] }));
+  const facts = [];
+  const budget = rows.find((row) => /\$40M/.test(row.text));
+  if (budget) {
+    facts.push({ text: 'Budget is $40M for the Ponderosa land loan at 90% LTC', source: `m:${budget.id}` });
+    facts.push({ text: 'Budget is $41M for the Ponderosa land loan', source: `m:${budget.id}` });
+  }
+  const rekord = rows.find((row) => /Rekord/.test(row.text));
+  if (rekord) facts.push({ text: 'Rekord letter is back leverage only, do not cite it to Blake', source: `m:${rekord.id}` });
+  if (rows.length) facts.push({ text: 'Blake prefers Tuesdays', source: 'm:missing' });
+  const carried = /<previous_facts>/.test(prompt);
+  const narrative = `Folded ${rows.length} messages${carried ? ' on top of an earlier fold' : ''}: the thread is planning the launch and sizing the Ponderosa land loan.`;
+  return `<supreme_fold>${JSON.stringify({ narrative, facts })}</supreme_fold>`;
+}
+
+function handleUserInput(message) {
+  const prompt = userText(message);
+  if (!prompt) return;
+  const index = inputIndex++;
+  if (process.env.WB_FIXTURE_CAPTURE_PROMPTS) {
+    fs.appendFileSync(promptLog, `${JSON.stringify({ args, prompt, index })}\n`);
+  }
+  // fixture-claude-overloaded lists the models (as --model names them) that
+  // are full: the turn ends the way the real CLI's does after its own 529
+  // retries.
+  let full = [];
+  try { full = fs.readFileSync(path.join(fixtureHome, 'fixture-claude-overloaded'), 'utf8').split(/\s+/).filter(Boolean); } catch {}
+  if (full.includes(args[args.indexOf('--model') + 1] || '')) {
+    line({ type: 'result', is_error: true, result: 'API Error: Repeated 529 Overloaded errors', usage: { input_tokens: 1, output_tokens: 0 }, total_cost_usd: 0 });
+    return;
+  }
+  // One-shot failure for redo tests: the first "explode once" prompt dies the
+  // way a signed-out CLI does; the marker file makes the resend succeed.
+  const explodeMarker = path.join(fixtureHome, 'fixture-claude-exploded');
+  if (/explode once/i.test(prompt) && !fs.existsSync(explodeMarker)) {
+    fs.writeFileSync(explodeMarker, 'used');
+    process.stderr.write('Error: not logged in. Please run /login\n');
+    process.exit(1);
+  }
+  // WB_FIXTURE_CLAUDE_THINKING: the turn opens with a thinking block. With
+  // --thinking-display summarized its deltas carry the summary, a paragraph
+  // at a time the way the real CLI's do; without the flag they carry nothing.
+  if (process.env.WB_FIXTURE_CLAUDE_THINKING) {
+    const summarized = args.includes('--thinking-display') && args[args.indexOf('--thinking-display') + 1] === 'summarized';
+    const paragraphs = process.env.WB_FIXTURE_CLAUDE_THINKING.split('\n\n');
+    schedule(() => line({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } } }), 1);
+    paragraphs.forEach((paragraph, at) => {
+      schedule(() => line({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: summarized ? `${paragraph}\n\n` : '', estimated_tokens: 50 * (at + 1) } } }), 2 + at);
+    });
+    schedule(() => line({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }), 2 + paragraphs.length);
+  }
+  if (index === 0) emitInitialWork();
+  const suggestionRequest = /<supreme_context_suggestion_request\b/i.test(prompt);
+  const foldRequest = /<supreme_fold_request\b/i.test(prompt);
+  const answer = foldRequest ? fixtureFold(prompt) : suggestionRequest
+    ? '<supreme_context_result>{"summary":"I noticed a durable preference.","exampleCount":null,"examples":[],"needsAccess":false,"accessMessage":"","entries":["Mention the specific profile you reviewed when following up on LinkedIn."]}</supreme_context_result>'
+    // Section 32, email to Supreme. The orchestrator asked for another tab
+    // picks Email Copy; a forwarded email gets Respones; the tab the email
+    // was handed to logs it, or drafts and asks when the email says so.
+    // (Latest first: a resumed session carries the earlier turns.)
+    : /Other tab\. Pick a different one\.\s*$/.test(prompt)
+      ? 'Email Copy writes the outbound, so that one then.\n\nHand to: Smartlead / Email Copy'
+    : /Read the messages from other tabs above/.test(prompt) && /Your standing instruction for deal replies/.test(prompt.split('<tab_messages').at(-1) || '')
+      ? `${/This is a dry run/.test(prompt.split('<tab_messages').at(-1) || '') ? 'Dry run, nothing saved in Gmail: ' : 'Saved in the thread: '}the reply to Morgan and the PFS ask to Jamie.\n\n1. To Morgan Example\n\n\`\`\`text\nHi Morgan,\n\nRent roll and T12 are in the room. It is a refi, not a purchase. PFS is coming from the sponsor.\n\nBest,\nAlex\n\`\`\`\n\n2. To Jamie Example\n\n\`\`\`text\nHi Jamie,\n\nCould you send the sponsor's PFS?\n\nBest,\nAlex\n\`\`\`\n\nSend these?`
+    : /Read the messages from other tabs above/.test(prompt) && /FIXTURE_EMAIL_WAITING/.test(prompt.split('<tab_messages').at(-1) || '')
+      ? 'Wrote a reply to Taylor asking for Example Lending\'s credit box.\n\n```text\nHi Taylor,\n\nCould you share your current credit box?\n\nBest,\nAlex\n```\n\nSend this?'
+    : /Read the messages from other tabs above/.test(prompt) && /Forwarded by email from/.test(prompt.split('<tab_messages').at(-1) || '')
+      ? 'Logged Example Lending as a pass on 101 Example Holdings. Taylor said another broker sent it to him first, so nothing went back to him.'
+    : /Vime passed this on: a reply from/.test(prompt.split('[This came in by email').at(-1) || '')
+      ? 'Morgan at ARC wants the rent roll and T12. Respones runs the lender replies.\n\nHand to: Smartlead / Respones'
+    : /This came in by email, forwarded by/.test(prompt) && /FIXTURE_EMAIL_ELSEWHERE/.test(prompt.split('This came in by email').at(-1))
+      ? 'Lloyd adds a 65% as-is cap to his mandate. Lender DB records lender terms.\n\nHand to: Deal Prospecting / Lender DB'
+    : /This came in by email, forwarded by/.test(prompt) && /FIXTURE_EMAIL_NOTAB/.test(prompt.split('This came in by email').at(-1))
+      ? 'This belongs with the ghosts.\n\nHand to: Nowhere / Ghost'
+    : /This came in by email, forwarded by/.test(prompt)
+      ? (/FIXTURE_EMAIL_WAITING/.test(prompt.split('This came in by email').at(-1))
+        ? 'Taylor wants a reply. Setup has the lender notes, so I\'d hand it there.\n\nHand to: Smartlead / Setup'
+        : 'Taylor at Example Lending passed on 101 Example Holdings. Respones runs the lender replies, so I\'d hand it there.\n\nHand to: Smartlead / Respones')
+    // @Supreme in Slack: a turn that should draft and ask, then the yes or
+    // the no that answers it.
+    // (The yes and the no are checked first: a resumed session's prompt
+    // carries the earlier turns, marker included.)
+    : /\bConfirm\.\s*$/.test(prompt)
+      ? 'Sent to Marilyn.'
+      : /\bNot yet\.\s*$/.test(prompt)
+        ? 'Left as a draft.'
+        // Section 31.1: the ticked drafts come back as plain words.
+        : /(?:^|\n)Send only [^\n]*\. Skip [^\n]*\.\s*$/.test(prompt)
+          ? 'Sent the ticked ones.'
+        // Section 31.1: several drafts, each under its own numbered name.
+        : /FIXTURE_DRAFTS_MANY[^\n]*\s*$/.test(prompt)
+          ? 'Three replies are ready.\n\n1. Robin Example\n\n```text\nHi Robin,\n\nTomorrow works.\n\nBest,\nAlex\n```\n\n2. Sam Example\n\n```text\nHi Sam,\n\nGot it, thanks.\n\nBest,\nAlex\n```\n\n3. Lee Example\n\n```text\nHi Lee,\n\nPerf, that is clear.\n\nBest,\nAlex\n```\n\nNothing was sent.\n\nSend these?'
+        // Reply to all: each lead's Send and Don't send name the lead.
+        : /^Send the reply to (.+?) \(/m.test(prompt)
+          ? `Sent to ${prompt.match(/^Send the reply to (.+?) \(/m)[1]}.`
+          : /^Do not send the reply to (.+?) \(/m.test(prompt)
+            ? `Left the reply to ${prompt.match(/^Do not send the reply to (.+?) \(/m)[1]} as a draft.`
+            // A draft the way the real model writes one: a bold name and a
+            // fenced block with a language, which Slack must not show raw.
+            : /FIXTURE_DRAFT_MD/.test(prompt)
+              // (The last lead in the prompt: a resumed session carries the earlier ones.)
+              ? `**${leadNameIn(prompt)}**\n\n\`\`\`text\nHi ${leadNameIn(prompt).split(' ')[0]},\n\nYes, we have the July 2026 valuation and can share it under an NDA.\n\nBest,\nAlex\n\`\`\`\n\nSend this?`
+        : /FIXTURE_SLACK_APPROVAL/.test(prompt)
+          ? 'The report points to a missing creation event. Want me to create a pull request?'
+        : /FIXTURE_DRAFT/.test(prompt)
+          ? 'Draft to Marilyn:\n\nThanks Marilyn, understood on the SBIC rule. Two of our current deals have an operating company inside them; I will send those over this week.\n\nSend this?'
+          : index === 0
+            ? 'Results: 4/4 confirmed sends on LinkedIn. Sent from Alex Example with approved pacing. CRM: 4/4 updated and verified as `Messaged`.'
+            : `Steering received: ${prompt}`;
+  const baseDelay = index === 0 ? responseDelay - 32 : responseDelay;
+  schedule(() => {
+    line({
+      type: 'stream_event',
+      event: { type: 'content_block_start', content_block: { type: 'text', text: '' } },
+    });
+  }, Math.max(1, baseDelay));
+  schedule(() => {
+    line({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: answer } },
+    });
+  }, Math.max(2, baseDelay + 6));
+  schedule(() => {
+    line({
+      type: 'result',
+      result: answer,
+      usage: { input_tokens: 1, output_tokens: 1 },
+      total_cost_usd: 0,
+    });
+  }, Math.max(3, baseDelay + 32));
+}
+
+// WB_FIXTURE_CLAUDE_SESSION: a real-shaped session id, with its file where
+// the real CLI keeps it, so a smoke can reach --resume.
+const sessionId = process.env.WB_FIXTURE_CLAUDE_SESSION || 'fixture-claude-thread';
+if (process.env.WB_FIXTURE_CLAUDE_SESSION) {
+  const projectDir = path.join(os.homedir(), '.claude', 'projects', process.cwd().replace(/[^a-z0-9]/gi, '-'));
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.appendFileSync(path.join(projectDir, `${sessionId}.jsonl`), '{}\n');
+}
+line({ type: 'system', session_id: sessionId });
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  inputBuffer += chunk;
+  let boundary;
+  while ((boundary = inputBuffer.indexOf('\n')) >= 0) {
+    const raw = inputBuffer.slice(0, boundary).trim();
+    inputBuffer = inputBuffer.slice(boundary + 1);
+    if (!raw) continue;
+    try { handleUserInput(JSON.parse(raw)); } catch {}
+  }
+});
+process.stdin.on('end', () => {
+  stdinEnded = true;
+  if (!timers.size) process.exit(0);
+});
+process.stdin.resume();

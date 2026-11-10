@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Local dependency installations and ignored build products"
+paths = [
+  '''(^|/)node_modules/''',
+  '''^desktop/dist/''',
+  '''^desktop/\.generated/''',
+]

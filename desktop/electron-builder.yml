@@ -1,0 +1,55 @@
+appId: com.meetsupreme.community
+productName: Supreme Community
+asar: true
+npmRebuild: false
+directories:
+  output: dist
+files:
+  - main.mjs
+  - update-schedule.mjs
+  - open-thread-links.mjs
+  - preload.cjs
+  - package.json
+  - assets/**/*
+extraResources:
+  - from: ../LICENSE
+    to: LICENSE
+  - from: ../NOTICE
+    to: NOTICE
+  - from: ../licenses
+    to: licenses
+  - from: ../server.mjs
+    to: app-server/server.mjs
+  - from: ../lib
+    to: app-server/lib
+  - from: ../public
+    to: app-server/public
+  # The relay is imported during backend boot, so its runtime dependencies
+  # must travel with the standalone app. A bundle nested under the repository
+  # can otherwise pass by resolving ../node_modules while /Applications fails.
+  - from: ../node_modules/@supabase
+    to: app-server/node_modules/@supabase
+  - from: ../node_modules/tslib
+    to: app-server/node_modules/tslib
+  - from: ../node_modules/iceberg-js
+    to: app-server/node_modules/iceberg-js
+  - from: .generated/.env.local
+    to: app-server/.env.local
+mac:
+  category: public.app-category.productivity
+  icon: assets/icon.icns
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+dmg:
+  title: Supreme Community ${version}
+  artifactName: Supreme-Community-${version}-${arch}.${ext}
+artifactName: Supreme-Community-${version}-${arch}.${ext}
+# Community builds do not register the official app's protocols or update feed.
+publish: null

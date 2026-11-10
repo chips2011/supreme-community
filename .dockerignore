@@ -1,0 +1,19 @@
+# Never bake secrets or bulk into the worker image.
+.env
+.env.local
+.git
+node_modules
+web/node_modules
+web/dist
+ios
+desktop
+public
+web
+docs
+supabase
+scripts
+public/legacy
+**/*.log
+.DS_Store
+scripts/test-bin
+.impeccable

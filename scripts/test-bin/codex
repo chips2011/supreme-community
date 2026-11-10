@@ -1,0 +1,669 @@
+#!/usr/bin/env node
+
+// Deterministic Codex CLI fixture for computer-use integration tests. It emits
+// the same public JSON event shapes the adapter consumes and never reaches a
+// model, browser, connector, or user data.
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+
+const args = process.argv.slice(2);
+const authFile = path.join(process.env.WORKBENCH_HOME || '/tmp', 'fixture-codex-auth');
+if (args[0] === '--version') {
+  // An older Codex unless a test says otherwise, so a tab set to a retired
+  // model stays on it (lib/codex-version.mjs).
+  let version = '0.144.6';
+  try { version = fs.readFileSync(path.join(process.env.WORKBENCH_HOME || '/tmp', 'fixture-codex-version'), 'utf8').trim() || version; } catch {}
+  process.stdout.write(`codex-cli ${version}\n`);
+  process.exit(0);
+}
+if (args[0] === 'login' && args[1] === 'status') {
+  const loggedIn = !fs.existsSync(authFile) || fs.readFileSync(authFile, 'utf8').trim() !== 'off';
+  if (loggedIn) process.stdout.write('Logged in using ChatGPT\n');
+  process.exit(loggedIn ? 0 : 1);
+}
+if (args[0] === 'logout') {
+  fs.writeFileSync(authFile, 'off');
+  process.exit(0);
+}
+if (args[0] === 'login') {
+  fs.writeFileSync(authFile, 'on');
+  process.exit(0);
+}
+if (args[0] === 'mcp' && args[1] === 'list') {
+  // Connector discovery is a control-plane query, not a model turn. Keep it
+  // from consuming the one-shot transport failure used by recovery tests.
+  process.stdout.write('Name  Command  Status  Auth\n');
+  let rows = [];
+  try { rows = JSON.parse(fs.readFileSync(path.join(process.env.WORKBENCH_HOME || '/tmp', 'fixture-connectors.json'), 'utf8')).codex || []; } catch {}
+  if (!rows.length && process.env.FIXTURE_CODEX_CONNECTORS) rows = process.env.FIXTURE_CODEX_CONNECTORS.split(',').map((name) => name.trim()).filter(Boolean);
+  for (const row of rows) {
+    const name = typeof row === 'string' ? row : row?.name;
+    if (!name) continue;
+    const auth = typeof row === 'string' ? 'OAuth' : (row.auth || 'OAuth');
+    process.stdout.write(`${name}  fixture  enabled  ${auth}\n`);
+  }
+  process.exit(0);
+}
+if (args[0] === 'mcp' && args[1] === 'login') {
+  // Sign in for a remote server: the real CLI opens the browser. Record who
+  // was asked so the smoke can see the button reached the CLI.
+  fs.writeFileSync(path.join(process.env.WORKBENCH_HOME || '/tmp', 'fixture-codex-mcp-login'), String(args[2] || ''));
+  process.exit(0);
+}
+if (args[0] === 'plugin' && args[1] === 'list') {
+  // ChatGPT account connectors surface as installed plugins, alongside the
+  // bundled tooling marketplaces that must never appear as connectors.
+  process.stdout.write(JSON.stringify({
+    installed: [
+      { pluginId: 'gmail@openai-connectors', name: 'gmail', marketplaceName: 'openai-connectors', installed: true, enabled: true, authPolicy: 'ON_INSTALL' },
+      { pluginId: 'pdf@openai-primary-runtime', name: 'pdf', marketplaceName: 'openai-primary-runtime', installed: true, enabled: true, authPolicy: 'ON_USE' },
+      { pluginId: 'browser@openai-bundled', name: 'browser', marketplaceName: 'openai-bundled', installed: true, enabled: true, authPolicy: 'ON_INSTALL' },
+    ],
+    available: [],
+  }) + '\n');
+  process.exit(0);
+}
+
+async function runAppServerFixture() {
+  const fixtureHome = process.env.WORKBENCH_HOME || '/tmp';
+  const promptLog = path.join(fixtureHome, 'fixture-codex-prompts.jsonl');
+  if (process.env.WB_FIXTURE_STUBBORN_HELPER === '1') {
+    const helper = spawn(process.execPath, [
+      '-e',
+      "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)",
+    ], { stdio: 'ignore' });
+    helper.unref();
+    fs.appendFileSync(path.join(fixtureHome, 'fixture-codex-helper-pids'), `${helper.pid}\n`);
+  }
+  const durationMs = Math.max(25, Number(process.env.WB_FIXTURE_DURATION_MS) || 120000);
+  const contextDurationMs = Math.max(40, Number(process.env.WB_FIXTURE_CONTEXT_DURATION_MS) || 90);
+  const connectorDelay = Number(process.env.FIXTURE_CONNECTOR_DELAY_MS || 300);
+  const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  // A uuid thread id (plus a rollout file under $HOME/.codex/sessions) lets a
+  // smoke reach thread/resume, which Supreme only attempts for a real id.
+  const threadId = process.env.WB_FIXTURE_THREAD_ID || 'fixture-computer-thread';
+  const turnId = 'fixture-app-turn';
+  const timers = new Set();
+  let heartbeat = null;
+  let completed = false;
+  let buffer = '';
+  const steers = [];
+  let browserConnectionCase = '';
+  const browserCall = (id, result, extra = {}) => notify('item/completed', {
+    threadId, turnId, item: { id, type: 'mcpToolCall', server: 'node_repl', tool: 'js', status: 'completed', arguments: { title: 'Check Chrome connection' }, result, ...extra },
+  });
+  const lostBrowser = (id = 'fixture-chrome-lost') => browserConnectionCase === 'GENERIC'
+    ? browserCall(id, { content: [{ type: 'text', text: 'No browser is available' }], isError: true }, { status: 'failed' })
+    : browserCall(id, { content: [{ type: 'text', text: 'Elapsed: 0.1 seconds\nOutput:\nError: Browser is not available: chrome' }] });
+
+  const line = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+  const notify = (method, params) => line({ method, params });
+  const schedule = (callback, delay) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      if (!completed) callback();
+    }, delay);
+    timers.add(timer);
+    return timer;
+  };
+  const clearWork = () => {
+    for (const timer of timers) clearTimeout(timer);
+    timers.clear();
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+  };
+  const inputParts = (input) => Array.isArray(input) ? input : [];
+  const inputText = (input) => inputParts(input)
+    .filter((part) => part?.type === 'text')
+    .map((part) => String(part.text || ''))
+    .join('\n')
+    .trim();
+  const inputImages = (input) => inputParts(input)
+    .filter((part) => part?.type === 'localImage' && part.path)
+    .map((part) => String(part.path));
+  const capture = (input, method, model) => {
+    if (!process.env.WB_FIXTURE_CAPTURE_PROMPTS) return;
+    const images = inputImages(input);
+    fs.appendFileSync(promptLog, `${JSON.stringify({
+      args: ['app-server', ...images.flatMap((filePath) => ['-i', filePath])],
+      prompt: inputText(input),
+      method,
+      model,
+    })}\n`);
+  };
+
+  // WB_FIXTURE_STREAM_MS: stream an answer token by token for the whole turn,
+  // the way the real app-server does, so a perf probe can load the renderer.
+  let streamed = '';
+  const complete = (status = 'completed', finalText = '') => {
+    if (completed) return;
+    completed = true;
+    clearWork();
+    if (status !== 'interrupted') {
+      const steering = steers.length ? ` Steering received in order: ${steers.join(' | ')}` : '';
+      notify('item/completed', {
+        threadId,
+        turnId,
+        item: {
+          id: 'fixture-final-answer',
+          type: 'agentMessage',
+          phase: 'final_answer',
+          text: finalText || (streamed ? `${streamed}${steering}` : `Fixture completed.${steering}`),
+        },
+      });
+    }
+    notify('turn/completed', {
+      threadId,
+      turn: { id: turnId, status, items: [], error: null },
+    });
+  };
+
+  const startTurn = (input, model) => {
+    capture(input, 'turn/start', model);
+    const prompt = inputText(input);
+    const contextRequest = /<supreme_context_request\b/i.test(prompt);
+    const contextHistory = contextRequest && /mode="history"/i.test(prompt);
+    const suggestionRequest = /<supreme_context_suggestion_request\b/i.test(prompt);
+    notify('thread/started', { thread: { id: threadId } });
+    notify('turn/started', { threadId, turn: { id: turnId, status: 'inProgress', items: [], error: null } });
+    browserConnectionCase = prompt.match(/FIXTURE_BROWSER_CONNECTION_(RECOVER|BLOCK|RACE|IGNORE|AGAIN|USER|GENERIC)/)?.[1] || '';
+    if (browserConnectionCase) {
+      schedule(() => {
+        // These foreign notifications must not change this run or cause a steer.
+        const foreign = { id: 'foreign-failure', type: 'mcpToolCall', server: 'node_repl', tool: 'js', status: 'failed', error: { message: 'Browser is not available: chrome' } };
+        notify('item/completed', { threadId: 'other-thread', turnId, item: foreign });
+        notify('item/completed', { threadId, turnId: 'other-turn', item: foreign });
+        if (browserConnectionCase === 'IGNORE') return;
+        lostBrowser();
+        lostBrowser();
+        if (browserConnectionCase === 'RACE') complete('completed', 'Chrome is disconnected. The upload is unfinished.');
+      }, 15);
+      schedule(() => complete('completed', browserConnectionCase === 'BLOCK' || browserConnectionCase === 'AGAIN'
+        ? 'Chrome is disconnected. The upload is unfinished.' : browserConnectionCase === 'USER' ? '' : 'Read-only fixture completed.'), 650);
+      return;
+    }
+    // fixture-codex-at-capacity lists the models OpenAI is turning away as
+    // full; a turn on one fails part way in, the way the real one does.
+    let full = [];
+    try { full = fs.readFileSync(path.join(fixtureHome, 'fixture-codex-at-capacity'), 'utf8').split(/\s+/).filter(Boolean); } catch {}
+    if (model && full.includes(model)) {
+      schedule(() => {
+        const message = 'Selected model is at capacity. Please try a different model.';
+        completed = true;
+        clearWork();
+        notify('error', { error: { message }, willRetry: false, threadId, turnId });
+        notify('turn/completed', { threadId, turn: { id: turnId, status: 'failed', items: [], error: { message } } });
+      }, Math.min(durationMs, 150));
+      return;
+    }
+    if (suggestionRequest) {
+      const result = '<supreme_context_result>{"summary":"I noticed a durable preference.","exampleCount":null,"examples":[],"needsAccess":false,"accessMessage":"","entries":["Mention the specific profile you reviewed when following up on LinkedIn."]}</supreme_context_result>';
+      schedule(() => complete('completed', result), contextDurationMs);
+      return;
+    }
+    if (contextRequest) {
+      schedule(() => {
+        notify('item/completed', {
+          threadId,
+          turnId,
+          item: {
+            id: 'fixture-context-note',
+            type: 'agentMessage',
+            phase: 'commentary',
+            text: contextHistory ? 'I’ll inspect the matching LinkedIn replies without changing anything.' : 'I’ll turn that into concise Context entries.',
+          },
+        });
+      }, 8);
+      if (contextHistory) {
+        schedule(() => {
+          notify('item/completed', {
+            threadId,
+            turnId,
+            item: {
+              id: 'fixture-context-linkedin',
+              type: 'mcpToolCall',
+              status: 'completed',
+              server: 'node_repl',
+              tool: 'js',
+              arguments: { title: 'Read LinkedIn replies to warm introductions' },
+              result: {
+                _meta: {
+                  'codex/toolSurface': {
+                    backend: 'chrome',
+                    kind: 'browserUse',
+                    screenshot: { pageUrl: 'https://www.linkedin.com/messaging/', url: image },
+                  },
+                },
+              },
+            },
+          });
+        }, 24);
+      }
+      const revisedContext = /Let warmth vary/i.test(prompt);
+      const result = contextHistory
+        ? '<supreme_context_result>{"summary":"From those examples, your replies are direct, specific, and match the other person’s tone. I drafted 3 entries.","exampleCount":3,"examples":[{"excerpt":"Thanks for the warm introduction — the timing is useful.","url":"https://www.linkedin.com/messaging/thread/example-1"},{"excerpt":"The specific reason I reached out is the overlap in private credit.","url":"https://www.linkedin.com/messaging/thread/example-2"},{"excerpt":"Happy to compare notes if useful.","url":"https://www.linkedin.com/messaging/thread/example-3"}],"needsAccess":false,"accessMessage":"","entries":["Lead with the specific reason for reaching out.","Keep replies direct and specific. Match the sender’s warmth when it fits.","Avoid sales language."]}</supreme_context_result>'
+        : revisedContext
+          ? '<supreme_context_result>{"summary":"Updated. I would save:","exampleCount":null,"examples":[],"needsAccess":false,"accessMessage":"","entries":["Lead with the specific reason for reaching out.","Keep replies direct and specific. Match the sender’s warmth when it fits.","Avoid sales language."]}</supreme_context_result>'
+          : '<supreme_context_result>{"summary":"Updated. I would save:","exampleCount":null,"examples":[],"needsAccess":false,"accessMessage":"","entries":["Lead with the specific reason for reaching out.","Keep replies direct and specific."]}</supreme_context_result>';
+      schedule(() => complete('completed', result), contextDurationMs);
+      return;
+    }
+    schedule(() => {
+      notify('item/completed', {
+        threadId,
+        turnId,
+        item: {
+          id: 'fixture-opening-note',
+          type: 'agentMessage',
+          phase: 'commentary',
+          text: 'I’ll inspect the connected workspace first.',
+        },
+      });
+    }, 8);
+    schedule(() => {
+      notify('item/started', {
+        threadId,
+        turnId,
+        item: {
+          id: 'fixture-granola-call',
+          type: 'mcpToolCall',
+          status: 'inProgress',
+          server: 'granola',
+          tool: 'search_meetings',
+          arguments: { meeting_title: 'Pipeline sync', account_email: 'fixture@example.com' },
+        },
+      });
+    }, 15);
+    if (!process.env.FIXTURE_CONNECTOR_ONLY) {
+      schedule(() => {
+        notify('item/completed', {
+          threadId,
+          turnId,
+          item: {
+            id: 'fixture-browser-fallback',
+            type: 'mcpToolCall',
+            status: 'completed',
+            server: 'notion_browser',
+            tool: 'use',
+            result: {},
+          },
+        });
+      }, 28);
+      schedule(() => {
+        notify('item/completed', {
+          threadId,
+          turnId,
+          item: {
+            id: 'fixture-browser-open',
+            type: 'mcpToolCall',
+            status: 'completed',
+            server: 'node_repl',
+            tool: 'js',
+            arguments: { title: 'Open LinkedIn profile 12' },
+            result: {
+              _meta: {
+                'codex/toolSurface': {
+                  backend: 'chrome',
+                  kind: 'browserUse',
+                  screenshot: { pageUrl: 'https://www.linkedin.com/in/example', url: image },
+                },
+              },
+            },
+          },
+        });
+      }, 40);
+    }
+    schedule(() => {
+      notify('item/completed', {
+        threadId,
+        turnId,
+        item: {
+          id: 'fixture-granola-call',
+          type: 'mcpToolCall',
+          status: 'completed',
+          server: 'granola',
+          tool: 'search_meetings',
+          arguments: { meeting_title: 'Pipeline sync', account_email: 'fixture@example.com' },
+          result: { duration_minutes: 38, meetings: [{ title: 'Pipeline sync' }] },
+        },
+      });
+    }, connectorDelay);
+    schedule(() => {
+      notify('item/started', {
+        threadId,
+        turnId,
+        item: {
+          id: 'fixture-notion-update',
+          type: 'mcpToolCall',
+          status: 'inProgress',
+          server: 'notion',
+          tool: 'update_rows',
+          arguments: { database_name: 'CRM', account: 'Vime workspace' },
+        },
+      });
+    }, connectorDelay + 15);
+    schedule(() => {
+      notify('item/completed', {
+        threadId,
+        turnId,
+        item: {
+          id: 'fixture-notion-update',
+          type: 'mcpToolCall',
+          status: 'completed',
+          server: 'notion',
+          tool: 'update_rows',
+          arguments: { database_name: 'CRM', account: 'Vime workspace' },
+          result: { rows: 4, status: 'Messaged', page_url: 'https://www.notion.so/CRM-abcdef1234567890abcdef1234567890' },
+        },
+      });
+    }, connectorDelay + 40);
+    if (!process.env.FIXTURE_CONNECTOR_ONLY) {
+      schedule(() => {
+        notify('item/completed', {
+          threadId,
+          turnId,
+          item: {
+            id: 'fixture-linkedin-send',
+            type: 'mcpToolCall',
+            status: 'completed',
+            server: 'node_repl',
+            tool: 'js',
+            arguments: { title: 'Sent LinkedIn message to fixture lead' },
+            result: {
+              _meta: {
+                'codex/toolSurface': {
+                  backend: 'chrome',
+                  kind: 'browserUse',
+                  screenshot: { pageUrl: 'https://www.linkedin.com/messaging/thread/example', url: image },
+                },
+              },
+            },
+          },
+        });
+      }, connectorDelay + 65);
+    }
+    const streamEvery = Number(process.env.WB_FIXTURE_STREAM_MS) || 0;
+    if (streamEvery > 0) {
+      const chars = Math.max(1, Number(process.env.WB_FIXTURE_STREAM_CHARS) || 6);
+      const corpus = 'The pipeline review found 147 qualified people across three lists, with 60 plausible accounts in Notion and two firms still on hold while their headcount is checked. ';
+      let cursor = 0;
+      let paragraph = 0;
+      schedule(() => notify('item/started', { threadId, turnId, item: { id: 'fixture-stream', type: 'agentMessage', phase: 'final_answer', text: '' } }), 12);
+      const ticker = setInterval(() => {
+        if (completed) return;
+        let delta = corpus.slice(cursor, cursor + chars);
+        cursor += chars;
+        if (cursor >= corpus.length) { cursor = 0; paragraph += 1; if (paragraph % 3 === 0) delta += '\n\n'; }
+        streamed += delta;
+        notify('item/agentMessage/delta', { threadId, turnId, itemId: 'fixture-stream', delta });
+      }, streamEvery);
+      timers.add(ticker);
+    }
+    heartbeat = setInterval(() => {
+      notify('item/completed', {
+        threadId,
+        turnId,
+        item: { id: `fixture-reasoning-${Date.now()}`, type: 'reasoning', summary: ['fixture heartbeat'], content: [] },
+      });
+    }, 180);
+    const turnDurationMs = /LIFECYCLE_HANG/i.test(prompt) ? 120_000 : durationMs;
+    // Section 29: a scheduled run that reaches something it may not do alone
+    // stops, asks, and names what it needs on its last line.
+    // FIXTURE_PARK names an app this turn touched; FIXTURE_PARK_STRANGER
+    // names one nobody has, which must never become an offer.
+    const parked = /FIXTURE_PARK_STRANGER/.test(prompt)
+      ? 'The transfer is ready.\n\nShall I send it?\n\nNeeds: Acme Bank · Wire the money'
+      : /FIXTURE_PARK/.test(prompt)
+        ? 'One reply came in. Dana asked for the enterprise rate card and the CRM rows are ready.\n\nShall I update the rows for Dana?\n\nNeeds: notion · update the rows'
+        // Codex's own suggested next asks, the way GPT answers carry them
+        // (2026-10-02): Supreme must lift them, never show them or ask.
+        : /FIXTURE_FOLLOWUPS/.test(prompt)
+          ? 'Example Project fits four lenders.\n\n:codex-followup[Submit Example Project]{prompt="Submit Project Example Project to Apex now and start the lender matching workflow."}\n\n:codex-followup[Ask for diligence]{prompt="Draft a reply to Avery asking for the AR aging, debt schedule, EBITDA bridge, and lender presentation needed to confirm the matches."}'
+          : '';
+    schedule(() => complete('completed', parked), turnDurationMs);
+  };
+
+  const handle = (message) => {
+    if (!message || typeof message !== 'object') return;
+    const respond = (result) => line({ id: message.id, result });
+    if (message.method === 'initialize') {
+      respond({ userAgent: 'supreme-fixture' });
+    } else if (message.method === 'thread/start') {
+      respond({ thread: { id: threadId } });
+    } else if (message.method === 'thread/resume') {
+      // Resumes go in a log of their own; the prompt log's rows are turns.
+      if (process.env.WB_FIXTURE_CAPTURE_PROMPTS) fs.appendFileSync(path.join(fixtureHome, 'fixture-codex-resumes.jsonl'), `${JSON.stringify({ threadId: message.params?.threadId || '', model: message.params?.model || '' })}\n`);
+      // The real answer carries the whole thread, screenshots included; pad it
+      // to WB_FIXTURE_RESUME_BYTES to play a session too long to read.
+      const pad = Number(process.env.WB_FIXTURE_RESUME_BYTES) || 0;
+      respond({ thread: { id: message.params?.threadId || threadId }, ...(pad ? { history: 'x'.repeat(pad) } : {}) });
+    } else if (message.method === 'turn/start') {
+      respond({ turn: { id: turnId, status: 'inProgress', items: [], error: null } });
+      startTurn(message.params?.input, message.params?.model);
+    } else if (message.method === 'turn/steer') {
+      const value = inputText(message.params?.input);
+      capture(message.params?.input, 'turn/steer');
+      if (browserConnectionCase && value.includes('<supreme_browser_recovery>')) {
+        if (message.params?.threadId !== threadId || message.params?.expectedTurnId !== turnId) {
+          line({ id: message.id, error: { code: -32602, message: 'Wrong browser recovery target' } });
+          return;
+        }
+        respond({ turnId });
+        schedule(() => browserCall('install-diagnostics', { content: [{ type: 'text', text: 'Extension enabled, manifest valid' }] }), 15);
+        if (!['BLOCK', 'GENERIC'].includes(browserConnectionCase)) {
+          schedule(() => browserCall('chrome-live', { _meta: { 'codex/toolSurface': { kind: 'browserUse', backend: 'chrome' } } }), 80);
+          if (browserConnectionCase === 'AGAIN') schedule(() => lostBrowser('lost-again'), 140);
+        }
+        return;
+      }
+      let refuse = '';
+      try { refuse = fs.readFileSync(path.join(fixtureHome, 'fixture-codex-refuse-steer'), 'utf8').trim(); } catch {}
+      if (refuse && refuse !== 'accept-finish') {
+        if (refuse === 'finish') complete();
+        line({ id: message.id, error: { code: -32601, message: 'Steering unavailable for this fixture turn' } });
+        return;
+      }
+      if (value) steers.push(value);
+      respond({ turnId });
+      if (refuse === 'accept-finish') complete();
+    } else if (message.method === 'turn/interrupt') {
+      respond({});
+      complete('interrupted');
+    }
+  };
+
+  await new Promise((resolve) => {
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+      buffer += chunk;
+      let boundary;
+      while ((boundary = buffer.indexOf('\n')) >= 0) {
+        const raw = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + 1);
+        if (!raw) continue;
+        try { handle(JSON.parse(raw)); } catch {}
+      }
+    });
+    process.stdin.on('end', () => { clearWork(); resolve(); });
+    process.stdin.on('error', () => { clearWork(); resolve(); });
+    process.on('SIGTERM', () => { clearWork(); resolve(); });
+    process.stdin.resume();
+  });
+}
+
+if (args[0] === 'app-server') {
+  await runAppServerFixture();
+  process.exit(0);
+}
+
+const line = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const durationMs = Math.max(25, Number(process.env.WB_FIXTURE_DURATION_MS) || 120000);
+const connectorDelay = Number(process.env.FIXTURE_CONNECTOR_DELAY_MS || 300);
+const fixtureHome = process.env.WORKBENCH_HOME || '/tmp';
+const promptLog = path.join(fixtureHome, 'fixture-codex-prompts.jsonl');
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  if (!process.env.WB_FIXTURE_CAPTURE_PROMPTS) return;
+  fs.appendFileSync(promptLog, `${JSON.stringify({ args, prompt: input })}\n`);
+});
+process.stdin.resume();
+
+const authFailureMarker = path.join(fixtureHome, 'fixture-codex-401-used');
+if (process.env.WB_FIXTURE_CODEX_401_ONCE && !fs.existsSync(authFailureMarker)) {
+  fs.writeFileSync(authFailureMarker, 'used');
+  line({ type: 'thread.started', thread_id: 'fixture-recovery-thread' });
+  if (process.env.WB_FIXTURE_CODEX_401_ONCE === 'after-tool') {
+    line({ type: 'item.completed', item: { type: 'agent_message', text: 'I’ll make the approved LinkedIn update now.' } });
+    line({
+      type: 'item.completed',
+      item: {
+        id: 'fixture-linkedin-action-before-401',
+        type: 'mcp_tool_call',
+        server: 'node_repl',
+        tool: 'js',
+        arguments: { title: 'Sent LinkedIn message to fixture lead' },
+        result: {
+          _meta: {
+            'codex/toolSurface': {
+              backend: 'chrome',
+              kind: 'browserUse',
+              screenshot: { pageUrl: 'https://www.linkedin.com/messaging/thread/example', url: image },
+            },
+          },
+        },
+      },
+    });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  process.stderr.write('ERROR codex_core::util: Orphan custom tool call output for call id: call_fixture\n');
+  process.stderr.write('ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://chatgpt.com/backend-api/codex/responses\n');
+  process.exit(1);
+}
+
+line({ type: 'thread.started', thread_id: 'fixture-computer-thread' });
+setTimeout(() => {
+  line({ type: 'item.completed', item: { type: 'agent_message', text: 'I’ll inspect the connected workspace first.' } });
+}, 8);
+setTimeout(() => {
+  line({
+    type: 'item.started',
+    item: {
+      id: 'fixture-granola-call',
+      type: 'mcp_tool_call',
+      server: 'granola',
+      tool: 'search_meetings',
+      arguments: { meeting_title: 'Pipeline sync', account_email: 'fixture@example.com' },
+    },
+  });
+}, 15);
+if (!process.env.FIXTURE_CONNECTOR_ONLY) {
+  // A fallback browser-shaped tool whose raw identifier also names a
+  // destination. The UI must classify the modality as computer control, not
+  // mistake it for a Notion connector.
+  setTimeout(() => {
+    line({
+      type: 'item.completed',
+      item: {
+        type: 'mcp_tool_call',
+        server: 'notion_browser',
+        tool: 'use',
+        result: {},
+      },
+    });
+  }, 28);
+  setTimeout(() => {
+    line({
+      type: 'item.completed',
+      item: {
+        type: 'mcp_tool_call',
+        server: 'node_repl',
+        tool: 'js',
+        arguments: { title: 'Open LinkedIn profile 12' },
+        result: {
+          _meta: {
+            'codex/toolSurface': {
+              backend: 'chrome',
+              kind: 'browserUse',
+              screenshot: { pageUrl: 'https://www.linkedin.com/in/example', url: image },
+            },
+          },
+        },
+      },
+    });
+  }, 40);
+}
+setTimeout(() => {
+  line({
+    type: 'item.completed',
+    item: {
+      id: 'fixture-granola-call',
+      type: 'mcp_tool_call',
+      server: 'granola',
+      tool: 'search_meetings',
+      arguments: { meeting_title: 'Pipeline sync', account_email: 'fixture@example.com' },
+      result: { duration_minutes: 38, meetings: [{ title: 'Pipeline sync' }] },
+    },
+  });
+}, connectorDelay);
+setTimeout(() => {
+  line({
+    type: 'item.started',
+    item: {
+      id: 'fixture-notion-update',
+      type: 'mcp_tool_call',
+      server: 'notion',
+      tool: 'update_rows',
+      arguments: { database_name: 'CRM', account: 'Vime workspace' },
+    },
+  });
+}, connectorDelay + 15);
+setTimeout(() => {
+  line({
+    type: 'item.completed',
+    item: {
+      id: 'fixture-notion-update',
+      type: 'mcp_tool_call',
+      server: 'notion',
+      tool: 'update_rows',
+      arguments: { database_name: 'CRM', account: 'Vime workspace' },
+      result: { rows: 4, status: 'Messaged', page_url: 'https://www.notion.so/CRM-abcdef1234567890abcdef1234567890' },
+    },
+  });
+}, connectorDelay + 40);
+if (!process.env.FIXTURE_CONNECTOR_ONLY) {
+  setTimeout(() => {
+    line({
+      type: 'item.completed',
+      item: {
+        type: 'mcp_tool_call',
+        server: 'node_repl',
+        tool: 'js',
+        arguments: { title: 'Sent LinkedIn message to fixture lead' },
+        result: {
+          _meta: {
+            'codex/toolSurface': {
+              backend: 'chrome',
+              kind: 'browserUse',
+              screenshot: { pageUrl: 'https://www.linkedin.com/messaging/thread/example', url: image },
+            },
+          },
+        },
+      },
+    });
+  }, connectorDelay + 65);
+}
+
+const heartbeat = setInterval(() => {
+  line({ type: 'item.completed', item: { type: 'reasoning', text: 'fixture heartbeat' } });
+}, 180);
+
+setTimeout(() => {
+  clearInterval(heartbeat);
+  line({ type: 'item.completed', item: { type: 'agent_message', text: 'Fixture completed.' } });
+  line({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
+  process.exit(0);
+}, durationMs);

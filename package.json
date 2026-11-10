@@ -1,0 +1,28 @@
+{
+  "name": "supreme-community",
+  "version": "0.1.119",
+  "private": true,
+  "type": "module",
+  "description": "Local model workspace for macOS, based on Supreme 0.1.119.",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "npm --prefix web run dev",
+    "typecheck": "npm --prefix web run typecheck",
+    "build": "npm --prefix web run build",
+    "test": "node scripts/community-tests.mjs",
+    "test:local": "node scripts/community-smoke.mjs",
+    "check:publication": "node scripts/check-publication.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chips2011/supreme-community.git"
+  },
+  "homepage": "https://meetsupreme.com",
+  "engines": {
+    "node": ">=24 <27"
+  }
+}

@@ -1,0 +1,14 @@
+# Fly config for the cloud worker IMAGE. There is no long-running service — the
+# desktop boots a Machine on demand (Machines API) with per-user env, and destroys
+# it on flip-back/idle. This file exists to build + push the image:
+#   npm run deploy:worker   (fly deploy --config fly.worker.toml --build-only --push)
+# which prints the image ref the desktop then boots machines from.
+app = "your-supreme-community-worker"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile.worker"
+
+# No [http_service] / [[services]]: workers are not served, they are booted
+# per-user and talk OUT to Supabase (relay + sync). Sizing is set at boot time
+# via the Machines API (shared-cpu-1x / 512MB is plenty for one session).

@@ -1,0 +1,36 @@
+{
+  "name": "supreme-community-desktop",
+  "version": "0.1.119",
+  "private": true,
+  "type": "module",
+  "author": "Supreme",
+  "license": "Apache-2.0",
+  "description": "Supreme Community for macOS",
+  "main": "main.mjs",
+  "scripts": {
+    "dev": "electron .",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:packaged": "node scripts/smoke.mjs --packaged",
+    "smoke:deep-links": "node scripts/open-thread-links-test.mjs && node scripts/deep-link-smoke.mjs",
+    "stage:auth": "node scripts/stage-auth-config.mjs",
+    "configure:cloud": "node scripts/configure-cloud-worker.mjs",
+    "renderer:build": "npm --prefix ../web run build",
+    "pack": "npm run renderer:build && npm run stage:auth && electron-builder --dir --mac --arm64 --publish never",
+    "dist": "npm run renderer:build && npm run stage:auth && electron-builder --mac dmg zip --arm64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chips2011/supreme-community.git"
+  },
+  "homepage": "https://meetsupreme.com",
+  "engines": {
+    "node": ">=24 <27"
+  }
+}

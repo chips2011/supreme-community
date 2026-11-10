@@ -1,0 +1,11 @@
+Supreme Community
+Copyright 2026 Supreme contributors
+
+Based on Supreme 0.1.119. The original Supreme source is licensed under the
+Apache License, Version 2.0. Third-party software retains its own licenses.
+
+Inline icon path data in web/src/icons.tsx originates from Lucide and Feather.
+The applicable license and copyright notices are preserved in licenses/lucide.txt.
+
+The Supreme name and marks identify the original project. The source license
+does not grant trademark rights or imply endorsement of third-party builds.

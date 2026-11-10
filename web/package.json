@@ -1,0 +1,39 @@
+{
+  "name": "workbench-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "React + TypeScript + Vite frontend for the Workbench agent workspace.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "ui-verify": "node verify-ui.mjs",
+    "ui-thread": "node verify-thread.mjs",
+    "ui-views": "node verify-views.mjs",
+    "ui-context": "node verify-context.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "puppeteer-core": "^23.11.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chips2011/supreme-community.git"
+  },
+  "homepage": "https://meetsupreme.com",
+  "engines": {
+    "node": ">=24 <27"
+  }
+}
