@@ -32,6 +32,11 @@ Community builds do not claim the official `supreme://` or `conductor://`
 URL handlers and leave automatic updates disabled. Forks that implement their
 own distribution must configure their own URL schemes and update feed.
 
+The community app registers `supreme-community://` for conversation links.
+New Slack and email replies use that scheme so **Open in Supreme** opens the
+original community app even when Apex Supreme is also installed. The desktop
+parser can still read legacy `supreme://` links passed directly to it.
+
 `stage:auth` writes only non-secret account configuration to ignored
 `desktop/.generated/.env.local`. It never stages Slack client credentials,
 service-role keys, signing keys or model credentials. With no account settings,

@@ -3,7 +3,7 @@ export function parseOpenThreadLink(value) {
   if (typeof value !== 'string' || value.length > 2048) return null;
   try {
     const url = new URL(value);
-    if (url.protocol !== 'supreme:' || url.hostname !== 'open'
+    if (!['supreme-community:', 'supreme:'].includes(url.protocol) || url.hostname !== 'open'
       || !['', '/'].includes(url.pathname) || url.username || url.password
       || url.port || url.hash) return null;
     if ([...url.searchParams.keys()].some(key => key !== 'thread' && key !== 'tab')

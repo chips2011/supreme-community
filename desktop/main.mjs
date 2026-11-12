@@ -400,9 +400,9 @@ function serverEntry() {
 }
 
 function registerDesktopProtocol() {
-  // Community builds do not take over the installed app's URL schemes.
-  if (process.env.SUPREME_REGISTER_PROTOCOLS !== '1' || IS_SMOKE_TEST) return;
-  for (const scheme of ['conductor', 'supreme']) {
+  // Open OG Slack/email links without taking over another Supreme edition.
+  if (IS_SMOKE_TEST) return;
+  for (const scheme of ['supreme-community']) {
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(scheme, process.execPath, [path.resolve(process.argv[1])]);
     } else {

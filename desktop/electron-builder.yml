@@ -52,4 +52,8 @@ dmg:
   artifactName: Supreme-Community-${version}-${arch}.${ext}
 artifactName: Supreme-Community-${version}-${arch}.${ext}
 # Community builds do not register the official app's protocols or update feed.
+protocols:
+  - name: Supreme Community conversation
+    schemes:
+      - supreme-community
 publish: null

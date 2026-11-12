@@ -4,6 +4,7 @@ let checks = 0;
 const check = (name, fn) => { fn(); checks++; console.log('PASS ' + name); };
 const link = 'supreme://open?thread=thread-1&tab=tab-2';
 check('email link selects its exact workstream and tab', () => assert.deepEqual(parseOpenThreadLink(link), { taskId: 'thread-1', tabId: 'tab-2' }));
+check('community Slack links open the same conversation without using the official scheme', () => assert.deepEqual(parseOpenThreadLink('supreme-community://open?thread=thread-1&tab=tab-2'), { taskId: 'thread-1', tabId: 'tab-2' }));
 check('query order and trailing slash are harmless', () => assert.deepEqual(parseOpenThreadLink('supreme://open/?tab=tab-2&thread=thread-1'), parseOpenThreadLink(link)));
 for (const invalid of [
   null, 12, '', 'https://open?thread=a&tab=b', 'javascript:alert(1)',
@@ -15,6 +16,9 @@ for (const invalid of [
   'supreme://open?thread=a&thread=c&tab=b', 'supreme://open?thread=a&tab=b&prompt=send',
   'supreme://open?thread=..%2Fa&tab=b', 'supreme://open?thread=a&tab=%0Ab',
   'supreme://open?thread=a&tab=' + 'a'.repeat(129),
+  'supreme-community://open?thread=a&tab=b&prompt=send',
+  'supreme-community://user@open?thread=a&tab=b',
+  'supreme-community://open/run?thread=a&tab=b',
 ]) check('rejects unsafe or malformed link ' + String(invalid).slice(0, 90), () => assert.equal(parseOpenThreadLink(invalid), null));
 const delivered = [];
 let windowAvailable = true;

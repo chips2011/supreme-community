@@ -6,6 +6,7 @@ import { join } from 'node:path';
 const scratch = mkdtempSync(join(tmpdir(), 'supreme-community-unit-'));
 const tests = [
   'scripts/community-config-test.mjs',
+  'scripts/community-links-test.mjs',
   'scripts/handoff-test.mjs', 'scripts/confirmation-test.mjs',
   'scripts/browser-connection-test.mjs', 'scripts/browser-connection-ui-test.mjs',
   'scripts/output-formatting-test.mjs', 'scripts/landed-keyboard-test.mjs',
